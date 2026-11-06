@@ -1,0 +1,16 @@
+# data: downloaded with `dow-ranker fetch-data`, see data/README.md
+data/*
+!data/README.md
+
+# secrets
+.env
+*.key
+
+# python
+.venv/
+__pycache__/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
