@@ -1,4 +1,5 @@
 """Dow weekly ranker: streamlit run app/streamlit_app.py"""
+import io
 from pathlib import Path
 
 import altair as alt
@@ -23,6 +24,57 @@ LEVELS = {"50 %": 0.5, "80 %": 0.8, "90 %": 0.9}
 
 st.set_page_config(page_title="Dow weekly ranker", layout="wide")
 model = RidgeModel.load()
+
+
+def read_upload(up):
+    """Reads an uploaded CSV; semicolon files (Czech/European Excel) are read with decimal commas."""
+    text = up.getvalue().decode("utf-8-sig", errors="replace")
+    header = text.splitlines()[0] if text.strip() else ""
+    sep = ";" if header.count(";") > header.count(",") else ","
+    return pd.read_csv(io.StringIO(text), sep=sep, decimal="," if sep == ";" else ".")
+
+
+def show_upload_help(expanded):
+    with st.expander("What to upload", expanded=expanded):
+        st.markdown("""
+**What happens with your file.** The model is already trained (on Q1 2011 of the UCI Dow Jones data) and does not
+change. Your file is only used to *predict*: the app ranks the stocks of one week of your data. If the file also
+contains the realized next-week returns, the *Track record* tab checks how good those predictions were.
+
+**Format.** A CSV file with **one row per stock and week**. Column names are not case-sensitive; extra columns are ignored.
+
+| Column | Required | Format | Example |
+|---|---|---|---|
+| `stock` | yes | ticker or any name | `MSFT` |
+| `date` | yes | last trading day of the week: `2011-05-13` or `5/13/2011` | `2011-05-13` |
+| `open` | yes | price at the start of the week (a `$` sign is allowed) | `25.80` |
+| `high` | yes | highest price of the week | `25.96` |
+| `low` | yes | lowest price of the week | `24.95` |
+| `close` | yes | price at the end of the week | `25.03` |
+| `volume` | yes | number of shares traded in the week | `382293426` |
+| `percent_change_next_weeks_price` | no | realized return of the *next* week in %, only for the Track record | `-1.88` |
+
+**Rules.**
+- At least **two consecutive weeks** for each stock (5 to 9 days apart): the model needs last week's return and volume.
+- At least **5 stocks** per week, ideally about 30; the ranking is relative to the stocks in the file.
+- **Weekly** data only. Daily or monthly rows are refused, because the weeks are not 5-9 days apart.
+- Separator: comma with decimal point, or semicolon with decimal comma (Excel in Czech settings).
+- Prices in the same currency for all stocks. Values the model never saw in training are allowed but flagged.
+
+**Example** (real rows of the UCI data; the table above shows MSFT in week 2011-05-13):
+```
+stock,date,open,high,low,close,volume
+AA,2011-05-06,17.27,17.96,16.83,17.15,225053559
+AA,2011-05-13,17.16,17.62,16.75,17.10,111630753
+AXP,2011-05-06,49.37,50.47,49.08,50.20,43997724
+AXP,2011-05-13,50.06,50.46,49.22,49.49,35427164
+```
+Weekly prices are available e.g. from Yahoo Finance (*Historical data*, frequency *Weekly*).
+""")
+        good = EXAMPLES["Example: clean data"]
+        if good.exists():
+            st.download_button("Download an example file (10 clean weeks, 30 stocks)", good.read_bytes(),
+                               "dow_ranker_example.csv", "text/csv")
 
 
 def show_ranking(r, level_label):
@@ -123,6 +175,7 @@ def show_data(df, r, week):
                                  width="stretch", theme="streamlit")
 
 
+read_error = None
 with st.sidebar:
     st.header("Input")
     sources = ((["UCI Dow Jones 2011"] if UCI.exists() else []) + [k for k, v in EXAMPLES.items() if v.exists()]
@@ -131,8 +184,11 @@ with st.sidebar:
     if source in EXAMPLES:
         raw = pd.read_csv(EXAMPLES[source])
     elif source == "Upload CSV":
-        up = st.file_uploader("Weekly rows: stock, date, open, high, low, close, volume", type="csv")
-        raw = pd.read_csv(up) if up else None
+        up = st.file_uploader("CSV with weekly rows (format: see the main page)", type="csv")
+        try:
+            raw = read_upload(up) if up else None
+        except (pd.errors.ParserError, pd.errors.EmptyDataError, UnicodeDecodeError, IndexError) as e:
+            raw, read_error = None, f"Could not read the file as CSV: {e}"
     elif source == "Synthetic example":
         raw = make_panel(seed=st.number_input("Seed", 0, 999, 0))
     else:
@@ -146,8 +202,13 @@ st.title("Dow weekly ranker")
 st.caption("Predicted return of each stock next week **relative to the average stock** (percentage points), "
            "from the ridge model of Part II. The signal is weak: read the intervals before the ranks.")
 
+if source == "Upload CSV":
+    show_upload_help(expanded=raw is None)
 if raw is None:
-    st.info("Upload a CSV with at least two consecutive weeks per stock.")
+    if read_error:
+        st.error(read_error)
+    else:
+        st.info("Upload a CSV in the sidebar; the format is described above.")
     st.stop()
 try:
     df = clean(raw)
