@@ -25,7 +25,7 @@ def test_future_columns_are_ignored(uci, model):
     for c in FUTURE_COLS:
         scrambled[c] = rng.normal(size=len(uci)) * 100
     pd.testing.assert_series_equal(preds(uci, model), preds(scrambled, model))
-    assert any("describe the future" in w for w in predict_week(uci, week=WEEK, model=model).warnings)
+    assert any("describe the future" in w for w in predict_week(uci, week=WEEK, model=model).notes)
 
 
 def test_later_weeks_do_not_matter(uci, model):

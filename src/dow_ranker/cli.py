@@ -44,6 +44,8 @@ def main(argv=None):
             print(f"saved {fetch_uci(a.dest)}")
         elif a.cmd == "predict":
             r = predict_week(a.csv, week=a.week, model=model, level=a.level)
+            for n in r.notes:
+                print(f"NOTE: {n}", file=sys.stderr)
             for w in r.warnings:
                 print(f"WARNING: {w}", file=sys.stderr)
             cols = ["rank", "stock", "pred_rel_return", "lower", "upper", "out_of_range"]

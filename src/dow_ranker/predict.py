@@ -20,13 +20,14 @@ class Prediction:
     table: pd.DataFrame            # one row per stock, best predicted first
     warnings: list = field(default_factory=list)
     excluded: dict = field(default_factory=dict)   # stock -> reason
+    notes: list = field(default_factory=list)      # information, not a problem with the data
 
 
 def _as_frame(data):
     return clean(data if isinstance(data, pd.DataFrame) else pd.read_csv(data))
 
 
-def _row_problems(df):
+def row_problems(df):
     """Reason why a row cannot be used, or '' if it is fine."""
     p = pd.Series("", index=df.index)
     checks = [
@@ -50,11 +51,11 @@ def predict_week(data, week=None, model=None, level=0.8):
     """
     model = model or RidgeModel.load()
     df = _as_frame(data)
-    warn, excluded = [], {}
+    warn, excluded, notes = [], {}, []
 
     ignored = [c for c in FUTURE_COLS if c in df]
     if ignored:
-        warn.append(f"ignored columns that describe the future: {', '.join(ignored)}")
+        notes.append(f"ignored columns that describe the future: {', '.join(ignored)}")
     df = df[REQUIRED]                                   # nothing else can reach the features
 
     if df["date"].isna().any():
@@ -71,7 +72,7 @@ def predict_week(data, week=None, model=None, level=0.8):
     df = df[df["date"] >= week - pd.Timedelta(days=WEEK_GAP[1])]   # weeks t and t-1 are all the features use
 
     in_week = set(df.loc[df["date"] == week, "stock"])
-    problems = _row_problems(df)
+    problems = row_problems(df)
     for i in problems[problems != ""].index:
         if df.at[i, "stock"] in in_week:
             excluded[df.at[i, "stock"]] = f"{problems[i]} in week {df.at[i, 'date'].date()}"
@@ -111,7 +112,7 @@ def predict_week(data, week=None, model=None, level=0.8):
     table = table.join(feats[FEATS].reset_index(drop=True))
     table = table.sort_values(["pred_rel_return", "stock"], ascending=[False, True]).reset_index(drop=True)
     table.insert(0, "rank", np.arange(1, len(table) + 1))
-    return Prediction(week=week, table=table, warnings=warn, excluded=excluded)
+    return Prediction(week=week, table=table, warnings=warn, excluded=excluded, notes=notes)
 
 
 def backtest(data, model=None, level=0.8, start=None):
@@ -122,7 +123,7 @@ def backtest(data, model=None, level=0.8, start=None):
     """
     model = model or RidgeModel.load()
     df = _as_frame(data)
-    df = df[df["date"].notna() & (_row_problems(df) == "")]
+    df = df[df["date"].notna() & (row_problems(df) == "")]
     m = build_features(df)
     if start is not None:
         m = m[m["date"] >= pd.Timestamp(start)]

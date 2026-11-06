@@ -5,22 +5,132 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from dow_ranker import InputError, RidgeModel, backtest, backtest_summary, clean, predict_week
+from dow_ranker import FEATS, InputError, RidgeModel, backtest, backtest_summary, clean, predict_week
 from dow_ranker.data import TARGET
+from dow_ranker.predict import row_problems
 from dow_ranker.synthetic import make_panel
 
-UCI = Path(__file__).resolve().parents[1] / "data" / "dow_jones_index.data"
-BLUE, GREY = "#2a78d6", "#8a8984"
+ROOT = Path(__file__).resolve().parents[1]
+UCI = ROOT / "data" / "dow_jones_index.data"
+EXAMPLES = {"Example: clean data": ROOT / "examples" / "data_good.csv",
+            "Example: data with errors": ROOT / "examples" / "data_bad.csv"}
+BLUE, GREY, RED = "#2a78d6", "#8a8984", "#e34948"
+SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
+FEATURE_NAMES = {"rel_ret": "return vs. average stock (%)", "mkt_ret": "average return of all stocks (%)",
+                 "ret_lag1": "last week's return (%)", "range": "high-low range (% of open)",
+                 "log_vol_ratio": "log(volume / last week's volume)", "log_dollar_vol": "log(volume x close)"}
 LEVELS = {"50 %": 0.5, "80 %": 0.8, "90 %": 0.9}
 
 st.set_page_config(page_title="Dow weekly ranker", layout="wide")
 model = RidgeModel.load()
 
+
+def show_ranking(r, level_label):
+    for n in r.notes:
+        st.info(n)
+    for w in r.warnings:
+        st.warning(w)
+    t = r.table
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Stocks ranked", len(t))
+    c2.metric("Spread of predictions (top - bottom)", f"{t['pred_rel_return'].iloc[0] - t['pred_rel_return'].iloc[-1]:.2f} pp")
+    c3.metric(f"Width of each {level_label} interval", f"{t['upper'].iloc[0] - t['lower'].iloc[0]:.2f} pp")
+
+    base = alt.Chart(t).encode(y=alt.Y("stock:N", sort=alt.SortField("rank"), title=None))
+    tooltip = ["rank", "stock", alt.Tooltip("pred_rel_return", format=".3f", title="prediction (pp)"),
+               alt.Tooltip("lower", format=".2f"), alt.Tooltip("upper", format=".2f"), "out_of_range"]
+    chart = (
+        alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(color=GREY, strokeDash=[4, 4]).encode(x="x:Q")
+        + base.mark_rule(color=BLUE, strokeWidth=2, opacity=0.45).encode(
+            x=alt.X("lower:Q", title=f"next-week return vs. average stock (pp), {level_label} interval"), x2="upper:Q",
+            tooltip=tooltip)
+        + base.mark_point(color=BLUE, filled=True, size=70).encode(x="pred_rel_return:Q", tooltip=tooltip)
+    ).properties(height=max(200, 18 * len(t)))
+    st.altair_chart(chart, width="stretch", theme="streamlit")
+    st.dataframe(t.round(4), hide_index=True, width="stretch")
+    st.download_button("Download table (CSV)", t.to_csv(index=False), f"ranking_{r.week.date()}.csv", "text/csv")
+
+
+def show_data(df, r, week):
+    problems = row_problems(df[df["date"].notna()])
+    ok = df[df["date"].notna()][problems == ""]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Rows", len(df))
+    c2.metric("Stocks", df["stock"].nunique())
+    c3.metric("Weeks", df["date"].nunique())
+    c4.metric("Rows with problems", int((problems != "").sum() + df["date"].isna().sum()))
+    bad = df[df["date"].notna()][problems != ""].assign(problem=problems[problems != ""])
+    if len(bad) or df["date"].isna().any():
+        with st.expander("Rows with problems (left out of everything below)", expanded=True):
+            show = pd.concat([bad, df[df["date"].isna()].assign(problem="unparseable date")])
+            st.dataframe(show[["stock", "date", "open", "high", "low", "close", "volume", "problem"]],
+                         hide_index=True, width="stretch")
+
+    # Price paths of chosen stocks: close as an index, 100 = the stock's first week
+    st.subheader("Price paths")
+    stocks = sorted(ok["stock"].unique())
+    default = (list(r.table["stock"].head(2)) + list(r.table["stock"].tail(2))) if r is not None else stocks[:4]
+    chosen = st.multiselect("Stocks (default: the top 2 and bottom 2 of the ranking)", stocks, default=default,
+                            max_selections=len(SERIES))
+    if chosen:
+        p = ok[ok["stock"].isin(chosen)].sort_values("date").copy()
+        p["index"] = p["close"] / p.groupby("stock")["close"].transform("first") * 100
+        color = alt.Color("stock:N", scale=alt.Scale(domain=chosen, range=SERIES[:len(chosen)]), legend=alt.Legend(orient="top"))
+        tip = ["stock", alt.Tooltip("date:T", format="%Y-%m-%d"), alt.Tooltip("close:Q", format=".2f"),
+               alt.Tooltip("index:Q", format=".1f")]
+        lines = alt.Chart(p).mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=40, filled=True)).encode(
+            x=alt.X("date:T", title=None), y=alt.Y("index:Q", title="close, first week = 100", scale=alt.Scale(zero=False)),
+            color=color, tooltip=tip)
+        rule = alt.Chart(pd.DataFrame({"d": [pd.Timestamp(week)]})).mark_rule(color=GREY, strokeDash=[4, 4]).encode(x="d:T")
+        layers = lines + rule
+        if len(chosen) <= 4:                                                    # few series: label line ends directly
+            last = p.groupby("stock").tail(1)
+            layers += alt.Chart(last).mark_text(align="left", dx=8, fontSize=12).encode(
+                x="date:T", y="index:Q", text="stock:N", color=alt.value(GREY))
+        st.altair_chart(layers.properties(height=320), width="stretch", theme="streamlit")
+        st.caption("Dashed line: the week being ranked.")
+
+    # The market each week: equal-weighted average return of the stocks in the file
+    st.subheader("Market return per week")
+    mk = (ok.assign(ret=(ok["close"] - ok["open"]) / ok["open"] * 100)
+          .groupby("date").agg(mkt_ret=("ret", "mean"), stocks=("stock", "size")).reset_index())
+    bars = alt.Chart(mk).mark_bar(color=BLUE, cornerRadiusEnd=4, size=16).encode(
+        x=alt.X("date:T", title=None), y=alt.Y("mkt_ret:Q", title="average weekly return (%)"),
+        tooltip=[alt.Tooltip("date:T", format="%Y-%m-%d"), alt.Tooltip("mkt_ret:Q", format=".2f", title="avg return %"), "stocks:Q"])
+    st.altair_chart(bars.properties(height=240), width="stretch", theme="streamlit")
+
+    # This week's inputs against what the model saw in training
+    st.subheader(f"Model inputs in week {pd.Timestamp(week).date()} vs. the training range")
+    st.caption("Each dot is a stock. The grey band is the range seen in training (Q1 2011); "
+               "red dots are outside it, so their prediction is an extrapolation.")
+    if r is None:
+        st.info("No prediction for this week, so there are no model inputs to show.")
+        return
+    cols = st.columns(3)
+    for i, feat in enumerate(FEATS):
+        lo, hi = model.train_range[feat]
+        d = r.table[["stock", feat]].rename(columns={feat: "value"})
+        d["outside"] = ~d["value"].between(lo, hi)
+        band = alt.Chart(pd.DataFrame({"lo": [lo], "hi": [hi]})).mark_rect(color=GREY, opacity=0.18).encode(x="lo:Q", x2="hi:Q")
+        dots = alt.Chart(d).mark_circle(size=70, opacity=0.85).encode(
+            x=alt.X("value:Q", title=FEATURE_NAMES[feat], scale=alt.Scale(zero=False)),
+            y=alt.Y("jitter:Q", axis=None, scale=alt.Scale(domain=[-1, 1])),
+            color=alt.condition("datum.outside", alt.value(RED), alt.value(BLUE)),
+            tooltip=["stock", alt.Tooltip("value:Q", format=".3f"), "outside"]
+        ).transform_calculate(jitter="sqrt(-2*log(random()))*cos(2*PI*random()) * 0.3")
+        labels = alt.Chart(d[d["outside"]]).mark_text(dy=-12, fontSize=11, color=GREY).encode(x="value:Q", text="stock:N")
+        cols[i % 3].altair_chart((band + dots + labels).properties(height=150, title=feat),
+                                 width="stretch", theme="streamlit")
+
+
 with st.sidebar:
     st.header("Input")
-    sources = (["UCI Dow Jones 2011"] if UCI.exists() else []) + ["Upload CSV", "Synthetic example"]
+    sources = ((["UCI Dow Jones 2011"] if UCI.exists() else []) + [k for k, v in EXAMPLES.items() if v.exists()]
+               + ["Upload CSV", "Synthetic example"])
     source = st.radio("Data", sources)
-    if source == "Upload CSV":
+    if source in EXAMPLES:
+        raw = pd.read_csv(EXAMPLES[source])
+    elif source == "Upload CSV":
         up = st.file_uploader("Weekly rows: stock, date, open, high, low, close, volume", type="csv")
         raw = pd.read_csv(up) if up else None
     elif source == "Synthetic example":
@@ -48,36 +158,21 @@ except InputError as e:
 weeks = sorted(df["date"].dropna().unique(), reverse=True)
 with st.sidebar:
     week = st.selectbox("Week to rank", weeks[:-1] or weeks, format_func=lambda d: pd.Timestamp(d).strftime("%Y-%m-%d"))
+try:
+    r, refused = predict_week(df, week=week, model=model, level=level), None
+except InputError as e:
+    r, refused = None, str(e)
 
-tab_rank, tab_track, tab_model = st.tabs(["Ranking", "Track record", "About the model"])
+tab_rank, tab_data, tab_track, tab_model = st.tabs(["Ranking", "Data", "Track record", "About the model"])
 
 with tab_rank:
-    try:
-        r = predict_week(df, week=week, model=model, level=level)
-    except InputError as e:
-        st.error(f"No prediction: {e}")
-        st.stop()
-    for w in r.warnings:
-        st.warning(w)
-    t = r.table
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Stocks ranked", len(t))
-    c2.metric("Spread of predictions (top - bottom)", f"{t['pred_rel_return'].iloc[0] - t['pred_rel_return'].iloc[-1]:.2f} pp")
-    c3.metric(f"Width of each {level_label} interval", f"{t['upper'].iloc[0] - t['lower'].iloc[0]:.2f} pp")
+    if refused:
+        st.error(f"No prediction for this week: {refused}")
+    else:
+        show_ranking(r, level_label)
 
-    base = alt.Chart(t).encode(y=alt.Y("stock:N", sort=alt.SortField("rank"), title=None))
-    tooltip = ["rank", "stock", alt.Tooltip("pred_rel_return", format=".3f", title="prediction (pp)"),
-               alt.Tooltip("lower", format=".2f"), alt.Tooltip("upper", format=".2f"), "out_of_range"]
-    chart = (
-        alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(color=GREY, strokeDash=[4, 4]).encode(x="x:Q")
-        + base.mark_rule(color=BLUE, strokeWidth=2, opacity=0.45).encode(
-            x=alt.X("lower:Q", title=f"next-week return vs. average stock (pp), {level_label} interval"), x2="upper:Q",
-            tooltip=tooltip)
-        + base.mark_point(color=BLUE, filled=True, size=70).encode(x="pred_rel_return:Q", tooltip=tooltip)
-    ).properties(height=max(200, 18 * len(t)))
-    st.altair_chart(chart, width="stretch", theme="streamlit")
-    st.dataframe(t.round(4), hide_index=True, width="stretch")
-    st.download_button("Download table (CSV)", t.to_csv(index=False), f"ranking_{r.week.date()}.csv", "text/csv")
+with tab_data:
+    show_data(df, r, week)
 
 with tab_track:
     if TARGET not in df:
