@@ -14,7 +14,7 @@ than the spread of the predictions. It is not a trading tool.
 Python 3.10 or newer.
 
 ```
-pip install "dow-ranker[app] @ git+https://github.com/sktomato/dow-ranker@v0.1.0"
+pip install "dow-ranker[app] @ git+https://github.com/SKTomato67/dow-ranker@v0.1.0"
 ```
 
 or from a clone: `pip install -e ".[app,dev]"`. Then download the data (UCI, CC BY 4.0):
