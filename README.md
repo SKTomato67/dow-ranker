@@ -9,6 +9,8 @@ weak it is. The project found almost no predictable signal: on the held-out week
 that of predicting 0. The tool shows this openly: the intervals (±2.2 pp at 80 %) are about 20 times wider
 than the spread of the predictions. It is not a trading tool.
 
+**Try it online:** [https://dow-ranker-ditvrzdqyxmtn5rphkj4dx.streamlit.app/](https://dow-ranker-ditvrzdqyxmtn5rphkj4dx.streamlit.app/) (Streamlit Community Cloud; no installation needed).
+
 ## Install
 
 Python 3.10 or newer.
@@ -46,6 +48,8 @@ r.warnings     # anything the user should know (excluded stocks, extrapolation, 
 
 **App**
 
+Online at [https://dow-ranker-ditvrzdqyxmtn5rphkj4dx.streamlit.app/](https://dow-ranker-ditvrzdqyxmtn5rphkj4dx.streamlit.app/), or locally:
+
 ```
 streamlit run app/streamlit_app.py
 ```
@@ -69,7 +73,7 @@ residuals from the training folds. Every stock gets the same width.
 
 ## How it is tested
 
-`pytest` (47 tests). GitHub Actions runs them on Linux and Windows, Python 3.10 and 3.13, after every push.
+`pytest` (51 tests). GitHub Actions runs them on Linux and Windows, Python 3.10 and 3.13, after every push.
 
 | Requirement | Test | Result |
 |---|---|---|
