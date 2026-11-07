@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from dow_ranker import FEATS, InputError, RidgeModel, backtest, backtest_summary, clean, predict_week
-from dow_ranker.data import TARGET
+from dow_ranker.data import TARGET, fetch_uci
 from dow_ranker.predict import row_problems
 from dow_ranker.synthetic import make_panel
 
@@ -24,6 +24,20 @@ LEVELS = {"50 %": 0.5, "80 %": 0.8, "90 %": 0.9}
 
 st.set_page_config(page_title="Dow weekly ranker", layout="wide")
 model = RidgeModel.load()
+
+
+@st.cache_resource(show_spinner="Downloading the UCI Dow Jones data...")
+def ensure_uci():
+    """The data are not in the repository; a fresh deployment downloads them once (CC BY 4.0)."""
+    if not UCI.exists():
+        try:
+            fetch_uci(UCI.parent)
+        except OSError:
+            pass                                                                # offline: the examples still work
+    return UCI.exists()
+
+
+ensure_uci()
 
 
 def read_upload(up):

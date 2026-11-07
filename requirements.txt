@@ -1,0 +1,2 @@
+# For Streamlit Community Cloud: installs the package from this repository with the app extras
+.[app]
