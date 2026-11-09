@@ -8,6 +8,7 @@ import streamlit as st
 
 from dow_ranker import FEATS, InputError, RidgeModel, backtest, backtest_summary, clean, predict_week
 from dow_ranker.data import TARGET, fetch_uci
+from dow_ranker.monitor import COVERAGE_DROP, NOW, OK, OOR_SHARE, RETRAIN_EVERY_DAYS, WINDOW, monitor
 from dow_ranker.predict import row_problems
 from dow_ranker.synthetic import make_panel
 
@@ -189,6 +190,87 @@ def show_data(df, r, week):
                                  width="stretch", theme="streamlit")
 
 
+def show_monitoring(df, week, level, level_label):
+    try:
+        m = monitor(df, model=model, level=level, as_of=week)
+    except InputError as e:
+        st.error(str(e))
+        return
+    as_of = m.as_of.date()
+    st.markdown(f"Judged **as of week {as_of}**, using only that week and earlier ones (pick another week in the sidebar "
+                "to see what the monitor said then). The rule: retrain every quarter, and earlier if a check fails.")
+    if m.status == OK:
+        st.success(f"No retraining needed. Next scheduled retrain: {m.next_scheduled.date()}.")
+    elif m.status == NOW:
+        st.error("Retrain now: " + "; ".join(c.text for c in m.checks if c.triggered) + ".")
+    else:
+        st.warning(f"Scheduled retrain due (every {RETRAIN_EVERY_DAYS} days; the checks below are fine).")
+    for c in m.checks:
+        st.markdown(f"{'🔴' if c.triggered else '🟢'} {c.text}")
+
+    w = m.weekly
+    floor = level - COVERAGE_DROP
+    c1, c2, c3 = st.columns(3)
+    cov_check = next(c for c in m.checks if c.name == "coverage")
+    c1.metric(f"{level_label} coverage, last {WINDOW} weeks", "–" if pd.isna(cov_check.value) else f"{cov_check.value:.1%}",
+              f"retrain below {floor:.0%}", delta_color="off")
+    drift = next(c for c in m.checks if c.name == "input_drift")
+    c2.metric("Stocks out of training range (this week)", "–" if pd.isna(drift.value) else f"{drift.value:.0%}",
+              f"retrain above {OOR_SHARE:.0%}", delta_color="off")
+    c3.metric("Days since training data", f"{(m.as_of - m.train_end).days}",
+              f"next retrain {m.next_scheduled.date()}", delta_color="off")
+    if w.empty:
+        st.info("No weeks after the training period up to this week, so there is nothing to monitor yet.")
+        return
+
+    a, b = st.columns(2)
+    if "rolling_coverage" in w and w["rolling_coverage"].notna().any():
+        cw = w.dropna(subset=["rolling_coverage"]).assign(judged=lambda d: d["rolling_weeks"] >= WINDOW)
+        ref = pd.DataFrame({"y": [level, floor], "what": ["nominal", "retrain below"]})
+        chart = (alt.Chart(cw).mark_line(color=BLUE, strokeWidth=2).encode(
+                     x=alt.X("date:T", title=None), y=alt.Y("rolling_coverage:Q", title=f"coverage, last {WINDOW} weeks",
+                                                          scale=alt.Scale(domain=[0, 1]), axis=alt.Axis(format="%")))
+                 + alt.Chart(cw).mark_point(filled=True, size=60).encode(
+                     x="date:T", y="rolling_coverage:Q",
+                     color=alt.condition("datum.judged", alt.value(BLUE), alt.value(GREY)),
+                     tooltip=[alt.Tooltip("date:T", format="%Y-%m-%d"), alt.Tooltip("rolling_coverage:Q", format=".1%"),
+                              alt.Tooltip("rolling_weeks:Q", title="weeks in window"),
+                              alt.Tooltip("coverage:Q", format=".0%", title="this week alone")])
+                 + alt.Chart(ref).mark_rule(strokeDash=[4, 4]).encode(
+                     y="y:Q", color=alt.Color("what:N", scale=alt.Scale(domain=["nominal", "retrain below"], range=[GREY, RED]),
+                                              legend=alt.Legend(orient="top", title=None)))
+                 ).properties(title="Rolling interval coverage", height=260)
+        a.altair_chart(chart, width="stretch", theme="streamlit")
+        a.caption(f"Grey points: fewer than {WINDOW} weeks in the window, shown but not judged "
+                  "(one week's coverage swings by about ±12 pp).")
+    else:
+        a.info(f"No realized returns (`{TARGET}`) up to this week, so coverage cannot be checked; "
+               "input drift and the schedule still are.")
+    drift_chart = (alt.Chart(w).mark_bar(cornerRadiusEnd=4, size=14).encode(
+                       x=alt.X("date:T", title=None),
+                       y=alt.Y("share_oor:Q", title="share of stocks", scale=alt.Scale(domain=[0, 1]), axis=alt.Axis(format="%")),
+                       color=alt.condition("datum.extreme_market", alt.value("#eda100"), alt.value(BLUE)),
+                       tooltip=[alt.Tooltip("date:T", format="%Y-%m-%d"), alt.Tooltip("share_oor:Q", format=".0%"),
+                                alt.Tooltip("extreme_market:N", title="market return out of range")])
+                   + alt.Chart(pd.DataFrame({"y": [OOR_SHARE]})).mark_rule(color=RED, strokeDash=[4, 4]).encode(y="y:Q")
+                   ).properties(title="Stocks with a feature outside the training range", height=260)
+    b.altair_chart(drift_chart, width="stretch", theme="streamlit")
+    b.caption("Stock-level features only. Amber bars: the market return itself was outside the training range that week "
+              "(one number for all stocks, so it is shown, not counted). Red line: retrain above it.")
+
+    with st.expander("How to retrain", expanded=m.retrain):
+        since = (m.as_of - pd.Timedelta(weeks=12)).date()
+        st.markdown(f"""
+Train on the **last 13 weeks** (one quarter, the size of the original training set), with realized returns:
+```
+dow-ranker train my_weeks.csv --since {since} --until {as_of} --out models/ridge_{as_of}.json
+dow-ranker predict my_weeks.csv --model models/ridge_{as_of}.json
+```
+`train` re-runs the same walk-forward tuning of alpha and recomputes the training ranges and interval widths. Keep the
+old JSON. With a signal this weak, retraining mainly recalibrates the intervals and ranges; expect alpha to stay large.
+""")
+
+
 read_error = None
 with st.sidebar:
     st.header("Input")
@@ -238,7 +320,8 @@ try:
 except InputError as e:
     r, refused = None, str(e)
 
-tab_rank, tab_data, tab_track, tab_model = st.tabs(["Ranking", "Data", "Track record", "About the model"])
+tab_rank, tab_data, tab_track, tab_mon, tab_model = st.tabs(["Ranking", "Data", "Track record", "Monitoring",
+                                                              "About the model"])
 
 with tab_rank:
     if refused:
@@ -280,6 +363,9 @@ with tab_track:
             a.altair_chart(cov, width="stretch", theme="streamlit")
             b.altair_chart(ic, width="stretch", theme="streamlit")
             st.dataframe(s.round(3), width="stretch")
+
+with tab_mon:
+    show_monitoring(df, week, level, level_label)
 
 with tab_model:
     i = model.info
