@@ -56,8 +56,17 @@ streamlit run app/streamlit_app.py
 ```
 
 Pick the data (UCI, upload a CSV, or a synthetic example), the week and the interval level. Tabs: the ranking
-with intervals, the data, the track record on weeks after the training period, monitoring (the retraining rule
-below, judged as of the selected week) and a description of the model.
+with intervals, the data, the track record on weeks after the training period, monitoring (judged as of the selected week) and a description of the model.
+
+**If the app says the output is not reliable.** Every tab starts with a verdict on the selected week (usable / use
+with caution / not reliable) and what you can do about it; you never need to retrain:
+
+- *Intervals too narrow for your data* (coverage check failed): switch on **Recalibrate intervals on my data** in
+  the sidebar. The interval widths are then taken from the model's errors on your last 8-13 weeks with realized
+  returns (split conformal, as in training); the predictions do not change. Without enough weeks, read the 90 %
+  interval as roughly an 80 % one.
+- *Stocks outside the training range*: switch on **Only stocks inside the training range** on the Ranking tab.
+- *Model older than a quarter*: use the output with more caution; retraining is the maintainer's job (below).
 
 The input is one row per stock and week with `stock, date, open, high, low, close, volume`, and must contain the
 week before the one you rank (see [data/README.md](data/README.md)). `examples/quickstart.ipynb` walks through it.
@@ -75,7 +84,7 @@ residuals from the training folds. Every stock gets the same width.
 
 ## How it is tested
 
-`pytest` (61 tests). GitHub Actions runs them on Linux and Windows, Python 3.10 and 3.13, after every push.
+`pytest` (73 tests). GitHub Actions runs them on Linux and Windows, Python 3.10 and 3.13, after every push.
 
 | Requirement | Test | Result |
 |---|---|---|
@@ -84,6 +93,7 @@ residuals from the training folds. Every stock gets the same width.
 | Bad inputs | missing column, empty file, duplicates, week not in the data, < 5 stocks → refused; missing/unparseable/negative values, high < low, no previous week → that stock excluded with a reason; unknown tickers, values outside the training range, non-Friday weeks, data long after training → warning | all as specified |
 | Reproducible | same input → same output; row order irrelevant; model stored as JSON (no pickle) with library versions; fresh install in a clean venv | identical |
 | Retraining rule | `monitor` must flag inflated outcome volatility, 2026-size dollar volume and an overdue schedule; must not flag held-out Q2, a single extreme market week, or coverage before 8 weeks are known; must ignore weeks after the as-of week | as specified; Q2 never flags |
+| User without retraining | verdict per week (usable / caution / not reliable) with the fixes; recalibrated widths equal the conformal quantile of the user's recent errors, use only earlier weeks, leave predictions unchanged, need 8 weeks of outcomes; the extrapolation filter ignores the market return | on 4x-volatile Q2 outcomes: shipped intervals cover < 50 % of later weeks, recalibrated ones about 80 % |
 | Honest uncertainty | coverage on the 13 held-out Q2 weeks (390 rows, never used in training or tuning) must be within 5 pp of nominal | 50 %: 46.4 %, 80 %: 76.4 %, 90 %: 86.2 % |
 
 The held-out MAE is 1.484 against 1.481 for predicting 0, and the mean weekly Spearman IC is 0.04. A test
@@ -91,7 +101,8 @@ checks that the tool never looks better than this.
 
 ## Monitoring and retraining
 
-Check every week after the Friday close (`dow-ranker monitor`, or the Monitoring tab). **Retrain once a quarter**
+This section is for the maintainer; users of the app never retrain (see *If the app says the output is not
+reliable* above). Check every week after the Friday close (`dow-ranker monitor`, or the Monitoring tab). **Retrain once a quarter**
 (91 days after the training data ends), **and earlier** if either trigger fires:
 
 | Check | Retrain when | Why this threshold |

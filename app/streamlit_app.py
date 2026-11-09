@@ -8,7 +8,9 @@ import streamlit as st
 
 from dow_ranker import FEATS, InputError, RidgeModel, backtest, backtest_summary, clean, predict_week
 from dow_ranker.data import TARGET, fetch_uci
-from dow_ranker.monitor import COVERAGE_DROP, NOW, OK, OOR_SHARE, RETRAIN_EVERY_DAYS, WINDOW, monitor
+from dow_ranker.monitor import (CAUTION, COVERAGE_DROP, NOW, OK, OOR_SHARE, RECAL_MIN_WEEKS, RECAL_WEEKS,
+                                RETRAIN_EVERY_DAYS, UNRELIABLE, WINDOW, extrapolated, monitor, recalibrate,
+                                user_verdict)
 from dow_ranker.predict import row_problems
 from dow_ranker.synthetic import make_panel
 
@@ -92,12 +94,33 @@ Weekly prices are available e.g. from Yahoo Finance (*Historical data*, frequenc
                                "dow_ranker_example.csv", "text/csv")
 
 
-def show_ranking(r, level_label):
+def show_verdict(v, compact=False):
+    """The user's answer to 'can I use this week's output?' with what they can do about it."""
+    box = {UNRELIABLE: st.error, CAUTION: st.warning}.get(v.level, st.success)
+    body = f"**{v.headline}**"
+    if v.actions:
+        body += "\n\n**What you can do:**\n" + "\n".join(f"- {a}" for a in v.actions)
+    box(body)
+    if v.notes and not compact:
+        for n in v.notes:
+            st.caption(n)
+
+
+def show_ranking(r, level_label, verdict, recalibrated):
+    if verdict is not None:
+        show_verdict(verdict, compact=True)
     for n in r.notes:
         st.info(n)
-    for w in r.warnings:
-        st.warning(w)
+    if r.warnings:
+        with st.expander(f"Data warnings ({len(r.warnings)})"):
+            for w in r.warnings:
+                st.warning(w)
     t = r.table
+    flagged = extrapolated(t)
+    if flagged.any():
+        if st.toggle(f"Only stocks inside the training range (hides {int(flagged.sum())} extrapolated)", key="only_in_range"):
+            t = t[~flagged]
+            st.caption("Ranks are kept from the full week, so gaps show where hidden stocks were.")
     c1, c2, c3 = st.columns(3)
     c1.metric("Stocks ranked", len(t))
     c2.metric("Spread of predictions (top - bottom)", f"{t['pred_rel_return'].iloc[0] - t['pred_rel_return'].iloc[-1]:.2f} pp")
@@ -114,6 +137,9 @@ def show_ranking(r, level_label):
         + base.mark_point(color=BLUE, filled=True, size=70).encode(x="pred_rel_return:Q", tooltip=tooltip)
     ).properties(height=max(200, 18 * len(t)))
     st.altair_chart(chart, width="stretch", theme="streamlit")
+    st.caption(f"About {1 - LEVELS[level_label]:.0%} of outcomes fall outside a {level_label} interval by design, so a "
+               "single stock outside its interval is normal. The Monitoring tab checks whether it happens too often."
+               + (" Intervals: recalibrated on your recent weeks." if recalibrated else ""))
     st.dataframe(t.round(4), hide_index=True, width="stretch")
     st.download_button("Download table (CSV)", t.to_csv(index=False), f"ranking_{r.week.date()}.csv", "text/csv")
 
@@ -190,23 +216,11 @@ def show_data(df, r, week):
                                  width="stretch", theme="streamlit")
 
 
-def show_monitoring(df, week, level, level_label):
-    try:
-        m = monitor(df, model=model, level=level, as_of=week)
-    except InputError as e:
-        st.error(str(e))
-        return
+def show_monitoring(m, level, level_label, verdict):
     as_of = m.as_of.date()
-    st.markdown(f"Judged **as of week {as_of}**, using only that week and earlier ones (pick another week in the sidebar "
-                "to see what the monitor said then). The rule: retrain every quarter, and earlier if a check fails.")
-    if m.status == OK:
-        st.success(f"No retraining needed. Next scheduled retrain: {m.next_scheduled.date()}.")
-    elif m.status == NOW:
-        st.error("Retrain now: " + "; ".join(c.text for c in m.checks if c.triggered) + ".")
-    else:
-        st.warning(f"Scheduled retrain due (every {RETRAIN_EVERY_DAYS} days; the checks below are fine).")
-    for c in m.checks:
-        st.markdown(f"{'🔴' if c.triggered else '🟢'} {c.text}")
+    st.markdown(f"Can you use the output of week **{as_of}**? Judged from that week and earlier ones only "
+                "(pick another week in the sidebar to see what the monitor said then).")
+    show_verdict(verdict)
 
     w = m.weekly
     floor = level - COVERAGE_DROP
@@ -241,7 +255,7 @@ def show_monitoring(df, week, level, level_label):
                                               legend=alt.Legend(orient="top", title=None)))
                  ).properties(title="Rolling interval coverage", height=260)
         a.altair_chart(chart, width="stretch", theme="streamlit")
-        a.caption(f"Grey points: fewer than {WINDOW} weeks in the window, shown but not judged "
+        a.caption(f"Shipped (2011) intervals. Grey points: fewer than {WINDOW} weeks in the window, not judged "
                   "(one week's coverage swings by about ±12 pp).")
     else:
         a.info(f"No realized returns (`{TARGET}`) up to this week, so coverage cannot be checked; "
@@ -258,10 +272,18 @@ def show_monitoring(df, week, level, level_label):
     b.caption("Stock-level features only. Amber bars: the market return itself was outside the training range that week "
               "(one number for all stocks, so it is shown, not counted). Red line: retrain above it.")
 
-    with st.expander("How to retrain", expanded=m.retrain):
+    with st.expander("For the maintainer: retraining rule", expanded=False):
+        if m.status == OK:
+            st.success(f"No retraining needed. Next scheduled retrain: {m.next_scheduled.date()}.")
+        elif m.status == NOW:
+            st.error("Retrain now: " + "; ".join(c.text for c in m.checks if c.triggered) + ".")
+        else:
+            st.warning(f"Scheduled retrain due (every {RETRAIN_EVERY_DAYS} days; the triggers are fine).")
+        for c in m.checks:
+            st.markdown(f"{'🔴' if c.triggered else '🟢'} {c.text}")
         since = (m.as_of - pd.Timedelta(weeks=12)).date()
         st.markdown(f"""
-Train on the **last 13 weeks** (one quarter, the size of the original training set), with realized returns:
+Retraining is the maintainer's job, not the user's. Train on the **last 13 weeks** (one quarter, the size of the original training set), with realized returns:
 ```
 dow-ranker train my_weeks.csv --since {since} --until {as_of} --out models/ridge_{as_of}.json
 dow-ranker predict my_weeks.csv --model models/ridge_{as_of}.json
@@ -315,8 +337,27 @@ except InputError as e:
 weeks = sorted(df["date"].dropna().unique(), reverse=True)
 with st.sidebar:
     week = st.selectbox("Week to rank", weeks[:-1] or weeks, format_func=lambda d: pd.Timestamp(d).strftime("%Y-%m-%d"))
+    try:
+        recal, recal_error = recalibrate(df, model=model, as_of=week), None
+    except InputError as e:
+        recal, recal_error = None, str(e)
+    use_recal = st.toggle("Recalibrate intervals on my data", value=False, disabled=recal is None,
+                          help=f"Takes the interval widths from the model's errors on your last {RECAL_MIN_WEEKS}-"
+                               f"{RECAL_WEEKS} weeks with realized returns instead of from 2011. The predictions do not "
+                               "change. " + (recal_error or ""))
+    if use_recal and recal is not None:
+        old, new = model.halfwidth[f"{level:g}"], recal.halfwidth[f"{level:g}"]
+        st.caption(f"{level_label} interval: ±{old:.2f} pp (2011) -> ±{new:.2f} pp (your weeks "
+                   f"{recal.info['recalibrated']['weeks'][0]} to {recal.info['recalibrated']['weeks'][1]}).")
+active = recal if use_recal and recal is not None else model
+
 try:
-    r, refused = predict_week(df, week=week, model=model, level=level), None
+    mon = monitor(df, model=model, level=level, as_of=week)           # shipped intervals, as the maintainer sees them
+    verdict = user_verdict(mon, recalibrated=active is not model, can_recalibrate=recal is not None)
+except InputError:
+    mon = verdict = None
+try:
+    r, refused = predict_week(df, week=week, model=active, level=level), None
 except InputError as e:
     r, refused = None, str(e)
 
@@ -327,7 +368,7 @@ with tab_rank:
     if refused:
         st.error(f"No prediction for this week: {refused}")
     else:
-        show_ranking(r, level_label)
+        show_ranking(r, level_label, verdict, recalibrated=active is not model)
 
 with tab_data:
     show_data(df, r, week)
@@ -337,7 +378,7 @@ with tab_track:
         st.info(f"The input has no realized returns (`{TARGET}`), so there is nothing to check yet.")
     else:
         start = pd.Timestamp(model.info["train_weeks"][1]) + pd.Timedelta(days=1)
-        bt = backtest(df, model=model, level=level, start=start)
+        bt = backtest(df, model=active, level=level, start=start)
         if bt.empty:
             st.info("No weeks after the training period with a realized next-week return.")
         else:
@@ -345,6 +386,9 @@ with tab_track:
             tot, weekly = s.loc["all weeks"], s.drop("all weeks").reset_index(names="week")
             st.markdown(f"Weeks after the training data ({weekly['week'].iloc[0]} to {weekly['week'].iloc[-1]}), "
                         "never used for fitting or tuning.")
+            if active is not model:
+                st.warning("Recalibrated intervals: their widths come from some of these weeks, so the coverage on "
+                           "those weeks is close to nominal by construction. Only later weeks are a real check.")
             c1, c2, c3 = st.columns(3)
             c1.metric(f"{level_label} interval coverage", f"{tot['coverage']:.1%}", f"{tot['coverage'] - level:+.1%} vs nominal",
                       delta_color="off")
@@ -365,10 +409,17 @@ with tab_track:
             st.dataframe(s.round(3), width="stretch")
 
 with tab_mon:
-    show_monitoring(df, week, level, level_label)
+    if mon is None:
+        st.info("Nothing to monitor for this week.")
+    else:
+        show_monitoring(mon, level, level_label, verdict)
 
 with tab_model:
     i = model.info
+    recal_text = "" if active is model else (
+        f"**Now recalibrated on your data** ({active.info['recalibrated']['n_residuals']} errors, weeks "
+        f"{active.info['recalibrated']['weeks'][0]} to {active.info['recalibrated']['weeks'][1]}): "
+        + ", ".join(f"{float(k):.0%}: ±{v:.2f} pp" for k, v in active.halfwidth.items()) + ".")
     st.markdown(f"""
 **Model.** Standardized features -> ridge regression (alpha = {model.alpha:.0f}, tuned by walk-forward CV on MAE),
 trained on {i['n_train_rows']} stock-weeks, {i['train_weeks'][0]} to {i['train_weeks'][1]} (UCI Dow Jones Index, Q1 2011).
@@ -376,6 +427,7 @@ CV MAE {i['cv_mae']:.4f} vs {i['cv_mae_baseline_zero']:.4f} for predicting 0; me
 
 **Intervals.** Split-conformal: the {i['n_oof_residuals']} out-of-fold absolute residuals give a half-width of
 {', '.join(f"{float(k):.0%}: ±{v:.2f} pp" for k, v in model.halfwidth.items())}. Same width for every stock.
+{recal_text}
 
 **Inputs.** Only weeks t and t-1 of each stock; columns about the future are ignored. The model does not use tickers,
 so any set of stocks works; the "market" is the average of the stocks you give it.
